@@ -55,11 +55,21 @@ export async function POST(req: Request) {
   if (!row) {
     const { data: withUsername } = await supabase
       .from("intranet_accounts")
-      .select("id")
+      .select("id, company_id")
       .eq("username", username)
       .limit(1);
 
     if (withUsername && withUsername.length > 0) {
+      const acct = withUsername[0] as { id: string; company_id: string };
+      // 실패 기록
+      await supabase.from("login_history").insert({
+        company_id: acct.company_id,
+        account_id: acct.id,
+        username,
+        ip_address: ip,
+        user_agent: ua,
+        success: false,
+      });
       return NextResponse.json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." }, { status: 401 });
     }
 
@@ -80,6 +90,7 @@ export async function POST(req: Request) {
       );
     }
 
+    // 아이디를 아예 못 찾았거나 기타 실패
     return NextResponse.json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." }, { status: 401 });
   }
 

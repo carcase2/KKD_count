@@ -23,4 +23,8 @@ alter table public.login_history enable row level security;
 create policy "login_history_select" on public.login_history
   for select using (true);
 
+-- 로그인 시도 기록을 위해 누구나 insert 가능 (서버 사이드에서 수행)
+create policy "login_history_insert" on public.login_history
+  for insert with check (true);
+
 comment on table public.login_history is '로그인 시도 히스토리 (성공/실패 포함)';
