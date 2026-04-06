@@ -1,26 +1,82 @@
 @import "tailwindcss";
 
+@source "../../node_modules/@tremor/**/*.{js,ts,jsx,tsx}";
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #f1f5f9;
+  --foreground: #0f172a;
+  --primary: #2563eb;
+  --primary-foreground: #ffffff;
+  --card: #ffffff;
+  --border: #e2e8f0;
+  --muted: #64748b;
+  --sidebar: #ffffff;
+  --ring-primary: rgba(37, 99, 235, 0.35);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-card: var(--card);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-sidebar: var(--sidebar);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: rgba(37, 99, 235, 0.2);
+  color: var(--foreground);
+}
+
+/* 메인 영역: 은은한 그리드 + 그라데이션 */
+.app-canvas {
+  min-height: 100dvh;
+  background-color: var(--background);
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -20%, rgba(37, 99, 235, 0.09), transparent),
+    radial-gradient(ellipse 80% 50% at 100% 50%, rgba(99, 102, 241, 0.05), transparent),
+    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    24px 24px,
+    24px 24px;
+}
+
+/* 모바일 가독성 */
+@media (max-width: 1023px) {
+  html {
+    font-size: 16px;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* 인쇄용 견적서 */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #quotation-print-root,
+  #quotation-print-root * {
+    visibility: visible;
+  }
+  #quotation-print-root {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    background: white;
+  }
 }
