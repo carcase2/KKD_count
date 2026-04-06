@@ -6,29 +6,72 @@ import type {
   Department,
   Task,
   TaskStatus,
+  TaskPriority,
+  TaskComment,
 } from "@/lib/types";
 
 export type TaskRow = {
   id: string;
   company_id: string;
+  department_id: string | null;
+  created_by: string | null;
   title: string;
   description: string | null;
   status: string;
-  assignee: string | null;
-  source: string | null;
+  priority: string;
+  due_date: string | null;
   created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  // Joins
+  task_assignments?: {
+    account_id: string;
+    intranet_accounts?: { display_name: string | null } | null;
+  }[];
+  department?: { name: string | null } | null;
+  comment_count?: [{ count: number }] | number | null;
 };
 
 export function rowToTask(r: TaskRow): Task {
-  const status = r.status as TaskStatus;
   return {
     id: r.id,
-    company_id: r.company_id,
+    companyId: r.company_id,
+    departmentId: r.department_id,
+    createdBy: r.created_by,
     title: r.title,
-    description: r.description ?? undefined,
-    status: status === "received" || status === "progress" || status === "done" ? status : "received",
-    assignee: r.assignee ?? undefined,
-    source: r.source === "call" || r.source === "manual" ? r.source : undefined,
+    description: r.description,
+    status: (r.status as any) || "todo",
+    priority: (r.priority as any) || "medium",
+    dueDate: r.due_date,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    assigneeIds: (r.task_assignments || []).map(a => a.account_id),
+    assigneeNames: (r.task_assignments || [])
+      .map(a => a.intranet_accounts?.display_name || "알 수 없음"),
+    departmentName: r.department?.name || null,
+    commentCount: typeof r.comment_count === 'number' ? r.comment_count : (Array.isArray(r.comment_count) ? r.comment_count[0]?.count : 0),
+  };
+}
+
+export type TaskCommentRow = {
+  id: string;
+  task_id: string;
+  author_id: string;
+  content: string;
+  created_at: string;
+  author?: { display_name: string | null } | null;
+};
+
+export function rowToTaskComment(r: TaskCommentRow): TaskComment {
+  return {
+    id: r.id,
+    taskId: r.task_id,
+    authorId: r.author_id,
+    authorName: r.author?.display_name || "알 수 없음",
+    content: r.content,
     createdAt: r.created_at,
   };
 }

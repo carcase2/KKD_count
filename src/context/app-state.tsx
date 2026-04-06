@@ -18,19 +18,21 @@ import {
   initialTasks,
   quotationLast7Days,
 } from "@/lib/mock-data";
-import type {
-  ApprovalRow,
-  CallRow,
-  DepartmentRow,
-  IntranetAccountRow,
-  TaskRow,
-} from "@/lib/supabase/mappers";
 import {
   rowToApprovalDoc,
   rowToCallLog,
   rowToCompanyUserFromAccount,
   rowToDepartment,
   rowToTask,
+  rowToTaskComment,
+} from "@/lib/supabase/mappers";
+import type {
+  ApprovalRow,
+  CallRow,
+  DepartmentRow,
+  IntranetAccountRow,
+  TaskRow,
+  TaskCommentRow,
 } from "@/lib/supabase/mappers";
 import type {
   ApprovalDoc,
@@ -41,6 +43,8 @@ import type {
   Department,
   Task,
   TaskStatus,
+  TaskPriority,
+  TaskComment,
   UserRole,
 } from "@/lib/types";
 import { DEMO_COMPANY_ID } from "@/lib/types";
@@ -56,12 +60,17 @@ type AppStateValue = {
   role: UserRole;
   setRole: (r: UserRole) => void;
   isAdmin: boolean;
+  session: any | null;
   tasks: Task[];
   addTask: (
-    t: Omit<Task, "id" | "company_id" | "createdAt">,
-    options?: { telegramToast?: boolean },
-  ) => void;
-  moveTask: (taskId: string, status: TaskStatus) => void;
+    t: Omit<Task, "id" | "companyId" | "createdAt" | "updatedAt">,
+  ) => Promise<boolean>;
+  updateTask: (taskId: string, patch: Partial<Task>) => Promise<void>;
+  moveTask: (taskId: string, status: TaskStatus) => Promise<void>;
+  deleteTask: (taskId: string) => Promise<void>;
+  getTaskComments: (taskId: string) => Promise<TaskComment[]>;
+  addTaskComment: (taskId: string, content: string) => Promise<void>;
+  deleteTaskComment: (commentId: string) => Promise<void>;
   callLogs: CallLog[];
   addCallLog: (c: Omit<CallLog, "id" | "company_id" | "createdAt">) => void;
   approvals: ApprovalDoc[];
@@ -142,7 +151,19 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     const cid = session.company_id;
 
     const [tRes, cRes, aRes, pRes, sRes, dRes, coRes] = await Promise.all([
-      supabase.from("tasks").select("*").eq("company_id", cid).order("created_at", { ascending: false }),
+      supabase
+        .from("tasks")
+        .select(`
+          *,
+          task_assignments(
+            account_id,
+            intranet_accounts(display_name)
+          ),
+          department:departments(name),
+          comment_count:task_comments(count)
+        `)
+        .eq("company_id", cid)
+        .order("created_at", { ascending: false }),
       supabase.from("call_logs").select("*").eq("company_id", cid).order("created_at", { ascending: false }),
       supabase.from("approval_documents").select("*").eq("company_id", cid).order("created_at", { ascending: false }),
       supabase
@@ -250,50 +271,108 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   const addTask = useCallback(
     async (
-      t: Omit<Task, "id" | "company_id" | "createdAt">,
-      options?: { telegramToast?: boolean },
+      t: Omit<Task, "id" | "companyId" | "createdAt" | "updatedAt">,
     ) => {
-      if (!useDatabase || !supabase) {
+      if (!useDatabase || !supabase || !session?.id) {
         const task: Task = {
           ...t,
           id: randomId(),
-          company_id: DEMO_COMPANY_ID,
+          companyId: companyId,
           createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          createdBy: "demo-user",
         };
         setTasks((prev) => [task, ...prev]);
-        if (options?.telegramToast !== false) {
-          toast.success("텔레그램 푸시 알림 전송 시뮬레이션", {
-            description: "봇이 채널에 업무 접수 메시지를 보냈습니다. (데모)",
-          });
-        }
-        return;
+        return true;
       }
 
       const { data, error } = await supabase
         .from("tasks")
         .insert({
           company_id: companyId,
+          department_id: t.departmentId,
+          created_by: session.id,
           title: t.title,
-          description: t.description ?? null,
+          description: t.description,
           status: t.status,
-          assignee: t.assignee ?? null,
-          source: t.source ?? "manual",
+          priority: t.priority,
+          due_date: t.dueDate,
         })
-        .select()
+        .select(`
+          *,
+          department:departments(name),
+          comment_count:task_comments(count)
+        `)
         .single();
 
       if (error) {
         toast.error(error.message);
+        return false;
+      }
+
+      if (t.assigneeIds && t.assigneeIds.length > 0) {
+        await supabase.from("task_assignments").insert(
+          t.assigneeIds.map((uid) => ({
+            task_id: data.id,
+            account_id: uid,
+          })),
+        );
+      }
+
+      await reloadFromSupabase();
+      toast.success("업무가 등록되었습니다.");
+      return true;
+    },
+    [useDatabase, supabase, session, companyId, reloadFromSupabase],
+  );
+
+  const updateTask = useCallback(
+    async (taskId: string, patch: Partial<Task>) => {
+      if (!useDatabase || !supabase) {
+        setTasks((prev) =>
+          prev.map((t) => (t.id === taskId ? { ...t, ...patch } : t)),
+        );
         return;
       }
-      if (data) setTasks((prev) => [rowToTask(data as TaskRow), ...prev]);
-      if (options?.telegramToast !== false) {
-        toast.success("텔레그램 푸시 알림 전송 시뮬레이션", {
-          description: "DB에 업무가 저장되었습니다.",
-        });
+
+      const { assigneeIds, ...rest } = patch;
+      const dbPatch: any = {};
+      if (rest.title !== undefined) dbPatch.title = rest.title;
+      if (rest.description !== undefined) dbPatch.description = rest.description;
+      if (rest.status !== undefined) dbPatch.status = rest.status;
+      if (rest.priority !== undefined) dbPatch.priority = rest.priority;
+      if (rest.dueDate !== undefined) dbPatch.due_date = rest.dueDate;
+      if (rest.departmentId !== undefined) dbPatch.department_id = rest.departmentId;
+
+      if (Object.keys(dbPatch).length > 0) {
+        const { error } = await supabase
+          .from("tasks")
+          .update(dbPatch)
+          .eq("id", taskId);
+        if (error) {
+          toast.error("업무 정보를 수정하지 못했습니다: " + error.message);
+          return;
+        }
       }
+
+      if (assigneeIds !== undefined) {
+        // 기존 담당자 삭제 후 다시 삽입
+        await supabase.from("task_assignments").delete().eq("task_id", taskId);
+        if (assigneeIds.length > 0) {
+          const { error: assignError } = await supabase
+            .from("task_assignments")
+            .insert(assigneeIds.map(uid => ({ task_id: taskId, account_id: uid })));
+          if (assignError) {
+            toast.error("담당자 정보를 수정하지 못했습니다: " + assignError.message);
+            return;
+          }
+        }
+      }
+
+      await reloadFromSupabase();
+      toast.success("업무가 수정되었습니다.");
     },
-    [useDatabase, supabase, companyId],
+    [useDatabase, supabase, reloadFromSupabase],
   );
 
   const moveTask = useCallback(
@@ -312,6 +391,72 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     [useDatabase, supabase],
   );
 
+  const deleteTask = useCallback(
+    async (taskId: string) => {
+      if (!useDatabase || !supabase) {
+        setTasks((prev) => prev.filter((x) => x.id !== taskId));
+        return;
+      }
+      const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      setTasks((prev) => prev.filter((x) => x.id !== taskId));
+      toast.success("업무가 삭제되었습니다.");
+    },
+    [useDatabase, supabase],
+  );
+
+  const getTaskComments = useCallback(
+    async (taskId: string): Promise<TaskComment[]> => {
+      if (!useDatabase || !supabase) return [];
+      const { data, error } = await supabase
+        .from("task_comments")
+        .select("*, author:intranet_accounts(display_name)")
+        .eq("task_id", taskId)
+        .order("created_at", { ascending: false });
+
+      if (error) {
+        toast.error(error.message);
+        return [];
+      }
+      return (data || []).map((r) => rowToTaskComment(r as TaskCommentRow));
+    },
+    [useDatabase, supabase],
+  );
+
+  const addTaskComment = useCallback(
+    async (taskId: string, content: string) => {
+      if (!useDatabase || !supabase || !session?.id) return;
+      const { error } = await supabase.from("task_comments").insert({
+        task_id: taskId,
+        author_id: session.id,
+        content: content.trim(),
+      });
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      // 댓글 수 업데이트를 위해 태스크 목록 다시 로드
+      await reloadFromSupabase();
+    },
+    [useDatabase, supabase, session?.id, reloadFromSupabase],
+  );
+
+  const deleteTaskComment = useCallback(
+    async (commentId: string) => {
+      if (!useDatabase || !supabase) return;
+      const { error } = await supabase.from("task_comments").delete().eq("id", commentId);
+      if (error) {
+        toast.error(error.message);
+        return;
+      }
+      await reloadFromSupabase();
+    },
+    [useDatabase, supabase, reloadFromSupabase],
+  );
+
   const addCallLog = useCallback(
     async (c: Omit<CallLog, "id" | "company_id" | "createdAt">) => {
       if (!useDatabase || !supabase) {
@@ -322,47 +467,47 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
           createdAt: new Date().toISOString(),
         };
         setCallLogs((prev) => [log, ...prev]);
-        await addTask(
-          {
-            title: `[전화] ${c.customerName} — ${c.inquiryType}`,
-            description: `연락처: ${c.phone} / 담당: ${c.assignee}`,
-            status: "received",
-            assignee: c.assignee,
-            source: "call",
-          },
-          { telegramToast: false },
-        );
-        toast.message("업무 관리 접수 탭에 카드가 생성되었습니다.");
-        return;
-      }
-
-      const { error: e1 } = await supabase.from("call_logs").insert({
-        company_id: companyId,
-        customer_name: c.customerName,
-        phone: c.phone,
-        inquiry_type: c.inquiryType,
-        assignee: c.assignee,
-      });
-      if (e1) {
-        toast.error(e1.message);
-        return;
-      }
-
-      const { error: e2 } = await supabase.from("tasks").insert({
-        company_id: companyId,
+      await addTask({
         title: `[전화] ${c.customerName} — ${c.inquiryType}`,
         description: `연락처: ${c.phone} / 담당: ${c.assignee}`,
-        status: "received",
-        assignee: c.assignee,
-        source: "call",
+        status: "todo",
+        priority: "medium",
+        assigneeIds: [],
+        departmentId: null,
+        dueDate: null,
+        createdBy: session?.id || "demo-user",
       });
-      if (e2) {
-        toast.error(e2.message);
-        return;
-      }
-
-      await reloadFromSupabase();
       toast.message("업무 관리 접수 탭에 카드가 생성되었습니다.");
+      return;
+    }
+
+    const { error: e1 } = await supabase.from("call_logs").insert({
+      company_id: companyId,
+      customer_name: c.customerName,
+      phone: c.phone,
+      inquiry_type: c.inquiryType,
+      assignee: c.assignee,
+    });
+    if (e1) {
+      toast.error(e1.message);
+      return;
+    }
+
+    const { error: e2 } = await supabase.from("tasks").insert({
+      company_id: companyId,
+      title: `[전화] ${c.customerName} — ${c.inquiryType}`,
+      description: `연락처: ${c.phone} / 담당: ${c.assignee}`,
+      status: "todo",
+      priority: "medium",
+      created_by: session?.id,
+    });
+    if (e2) {
+      toast.error(e2.message);
+      return;
+    }
+
+    await reloadFromSupabase();
+    toast.message("업무 관리 접수 탭에 카드가 생성되었습니다.");
     },
     [useDatabase, supabase, companyId, reloadFromSupabase, addTask],
   );
@@ -738,9 +883,15 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       role,
       setRole,
       isAdmin,
+      session,
       tasks,
       addTask,
+      updateTask,
       moveTask,
+      deleteTask,
+      getTaskComments,
+      addTaskComment,
+      deleteTaskComment,
       callLogs,
       addCallLog,
       approvals,
@@ -774,7 +925,12 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       isAdmin,
       tasks,
       addTask,
+      updateTask,
       moveTask,
+      deleteTask,
+      getTaskComments,
+      addTaskComment,
+      deleteTaskComment,
       callLogs,
       addCallLog,
       approvals,

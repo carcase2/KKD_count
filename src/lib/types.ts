@@ -2,18 +2,38 @@ export const DEMO_COMPANY_ID = "demo-company-001";
 
 export type UserRole = "admin" | "user";
 
-export type TaskStatus = "received" | "progress" | "done";
+export type TaskStatus = "todo" | "in_progress" | "pending" | "done";
+export type TaskPriority = "low" | "medium" | "high" | "urgent";
 
 export type EmploymentStatus = "active" | "leave" | "resigned";
 
 export interface Task {
   id: string;
-  company_id: string;
+  companyId: string;
+  departmentId: string | null;
+  createdBy: string | null;
+  assigneeIds: string[];
   title: string;
-  description?: string;
+  description: string | null;
   status: TaskStatus;
-  assignee?: string;
-  source?: "manual" | "call";
+  priority: TaskPriority;
+  dueDate: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  // UI 전용 필드 (Join 결과물)
+  assigneeNames?: string[];
+  departmentName?: string | null;
+  commentCount?: number;
+}
+
+export interface TaskComment {
+  id: string;
+  taskId: string;
+  authorId: string;
+  authorName: string;
+  content: string;
   createdAt: string;
 }
 
