@@ -18,7 +18,6 @@ import {
   Layout, 
   MessageSquare, 
   Clock, 
-  User, 
   Plus, 
   ChevronLeft, 
   ChevronRight,
@@ -26,7 +25,9 @@ import {
   CheckCircle2,
   MoreVertical,
   Trash2,
+  Loader2,
 } from "lucide-react";
+import { toast } from "sonner";
 import { useAppState } from "@/context/app-state";
 import type { Task, TaskStatus, TaskPriority, TaskComment } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -205,6 +206,17 @@ const KR_HOLIDAYS = [
  */
 function TaskCalendar({ tasks, onCardClick }: { tasks: Task[]; onCardClick: (t: Task) => void }) {
   const [currentDate, setCurrentDate] = useState(new Date());
+
+  const tasksByDueDate = useMemo(() => {
+    const m = new Map<string, Task[]>();
+    for (const t of tasks) {
+      if (!t.dueDate) continue;
+      const list = m.get(t.dueDate) ?? [];
+      list.push(t);
+      m.set(t.dueDate, list);
+    }
+    return m;
+  }, [tasks]);
   
   const daysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
   const firstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay();
@@ -251,14 +263,14 @@ function TaskCalendar({ tasks, onCardClick }: { tasks: Task[]; onCardClick: (t: 
         date: i,
         fullDate,
         isCurrentMonth: true,
-        tasks: tasks.filter(t => t.dueDate === fullDate),
+        tasks: tasksByDueDate.get(fullDate) ?? [],
         dayOfWeek: dDate.getDay(),
         isHoliday: KR_HOLIDAYS.includes(md)
       });
     }
     
     return d;
-  }, [year, month, tasks]);
+  }, [year, month, tasksByDueDate]);
 
   return (
     <div className="rounded-2xl border border-slate-200 bg-white overflow-hidden shadow-sm">
@@ -332,6 +344,10 @@ function TaskDetailModal({ task, open, onOpenChange }: {
   const [comments, setComments] = useState<TaskComment[]>([]);
   const [newComment, setNewComment] = useState("");
   const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [quickAction, setQuickAction] = useState<null | "start" | "pend" | "complete">(null);
+  const [commentSubmitting, setCommentSubmitting] = useState(false);
   
   // Local edit states
   const [title, setTitle] = useState(task.title);
@@ -357,41 +373,73 @@ function TaskDetailModal({ task, open, onOpenChange }: {
     }
   }, [open, task, getTaskComments]);
 
+  const actionBusy = saving || deleting || quickAction !== null || commentSubmitting;
+
   const handleSave = async () => {
-    await updateTask(task.id, {
-      title,
-      description: desc,
-      status,
-      priority,
-      assigneeIds,
-      departmentId: deptId === "none" ? null : deptId,
-      dueDate: dueDate || null
-    });
-    setEditing(false);
+    const trimmed = title.trim();
+    if (!trimmed) {
+      toast.error("제목을 입력하세요.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await updateTask(task.id, {
+        title: trimmed,
+        description: desc,
+        status,
+        priority,
+        assigneeIds,
+        departmentId: deptId === "none" ? null : deptId,
+        dueDate: dueDate || null
+      });
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleAddComment = async () => {
     if (!newComment.trim()) return;
     const content = newComment.trim();
-    setNewComment(""); // Clear input immediately for better UX
-    await addTaskComment(task.id, content);
-    // Fetch latest comments after adding
-    const latestComments = await getTaskComments(task.id);
-    setComments(latestComments);
+    setCommentSubmitting(true);
+    try {
+      const added = await addTaskComment(task.id, content);
+      if (added) {
+        setComments((prev) => [added, ...prev]);
+        setNewComment("");
+      }
+    } finally {
+      setCommentSubmitting(false);
+    }
   };
 
   const handleStart = async () => {
     const today = new Date().toISOString().split('T')[0];
-    await updateTask(task.id, { status: "in_progress", startedAt: today });
+    setQuickAction("start");
+    try {
+      await updateTask(task.id, { status: "in_progress", startedAt: today });
+    } finally {
+      setQuickAction(null);
+    }
   };
 
   const handlePend = async () => {
-    await updateTask(task.id, { status: "pending" });
+    setQuickAction("pend");
+    try {
+      await updateTask(task.id, { status: "pending" });
+    } finally {
+      setQuickAction(null);
+    }
   };
 
   const handleComplete = async () => {
     const today = new Date().toISOString().split('T')[0];
-    await updateTask(task.id, { status: "done", finishedAt: today });
+    setQuickAction("complete");
+    try {
+      await updateTask(task.id, { status: "done", finishedAt: today });
+    } finally {
+      setQuickAction(null);
+    }
   };
 
   return (
@@ -410,15 +458,19 @@ function TaskDetailModal({ task, open, onOpenChange }: {
           </div>
           <div className="flex items-center gap-2">
             {!editing && (
-              <Button variant="secondary" onClick={() => setEditing(true)}>편집</Button>
+              <Button variant="secondary" onClick={() => setEditing(true)} disabled={actionBusy}>편집</Button>
             )}
-            <Button variant="ghost" className="text-red-500 hover:text-red-600 hover:bg-red-50" onClick={async () => {
-              if (confirm("정말로 삭제하시겠습니까?")) {
+            <Button variant="ghost" className="text-red-500 hover:text-red-600 hover:bg-red-50" disabled={actionBusy} onClick={async () => {
+              if (!confirm("정말로 삭제하시겠습니까?")) return;
+              setDeleting(true);
+              try {
                 await deleteTask(task.id);
                 onOpenChange(false);
+              } finally {
+                setDeleting(false);
               }
             }}>
-              <Trash2 className="h-4 w-4" />
+              {deleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
             </Button>
           </div>
         </div>
@@ -428,20 +480,20 @@ function TaskDetailModal({ task, open, onOpenChange }: {
           <div className="flex-none px-6 py-3 bg-slate-50 border-b border-slate-100 flex items-center gap-3">
             <span className="text-xs font-bold text-slate-400 uppercase tracking-tighter mr-2">Quick Actions</span>
             {task.status === "todo" && (
-              <Button onClick={handleStart} className="min-h-9 h-9 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-2 shadow-sm">
-                <Clock className="h-3.5 w-3.5" />
+              <Button onClick={() => void handleStart()} disabled={quickAction !== null} className="min-h-9 h-9 px-3 text-xs bg-blue-600 hover:bg-blue-700 text-white gap-2 shadow-sm">
+                {quickAction === "start" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Clock className="h-3.5 w-3.5" />}
                 업무 시작
               </Button>
             )}
             {task.status !== "done" && task.status !== "pending" && (
-              <Button variant="secondary" onClick={handlePend} className="min-h-9 h-9 px-3 text-xs border-orange-200 text-orange-600 hover:bg-orange-50 gap-2">
-                <AlertCircle className="h-3.5 w-3.5" />
+              <Button variant="secondary" onClick={() => void handlePend()} disabled={quickAction !== null} className="min-h-9 h-9 px-3 text-xs border-orange-200 text-orange-600 hover:bg-orange-50 gap-2">
+                {quickAction === "pend" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AlertCircle className="h-3.5 w-3.5" />}
                 보류 처리
               </Button>
             )}
             {task.status !== "done" && (
-              <Button onClick={handleComplete} className="min-h-9 h-9 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-2 shadow-sm">
-                <CheckCircle2 className="h-3.5 w-3.5" />
+              <Button onClick={() => void handleComplete()} disabled={quickAction !== null} className="min-h-9 h-9 px-3 text-xs bg-emerald-600 hover:bg-emerald-700 text-white gap-2 shadow-sm">
+                {quickAction === "complete" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <CheckCircle2 className="h-3.5 w-3.5" />}
                 업무 완료
               </Button>
             )}
@@ -460,7 +512,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="col-span-2 space-y-2">
               <Label className="text-slate-500">제목</Label>
               {editing ? (
-                <Input value={title} onChange={e => setTitle(e.target.value)} />
+                <Input value={title} onChange={e => setTitle(e.target.value)} disabled={saving} />
               ) : (
                 <p className="font-bold text-lg text-slate-900">{task.title}</p>
               )}
@@ -469,7 +521,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="space-y-2">
               <Label className="text-slate-500">상태</Label>
               {editing ? (
-                <Select value={status} onValueChange={(v: any) => setStatus(v)}>
+                <Select value={status} onValueChange={(v) => setStatus(v as TaskStatus)} disabled={saving}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {COLS.map(c => <SelectItem key={c.status} value={c.status}>{c.title}</SelectItem>)}
@@ -486,7 +538,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="space-y-2">
               <Label className="text-slate-500">중요도</Label>
               {editing ? (
-                <Select value={priority} onValueChange={(v: any) => setPriority(v)}>
+                <Select value={priority} onValueChange={(v) => setPriority(v as TaskPriority)} disabled={saving}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {PRIORITIES.map(p => <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>)}
@@ -511,6 +563,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
                            type="checkbox"
                            className="h-4 w-4 rounded border-slate-300 text-blue-600"
                            checked={assigneeIds.includes(u.id)}
+                           disabled={saving}
                            onChange={(e) => {
                               if (e.target.checked) setAssigneeIds(prev => [...prev, u.id]);
                               else setAssigneeIds(prev => prev.filter(id => id !== u.id));
@@ -542,7 +595,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="space-y-2">
               <Label className="text-slate-500">부서</Label>
               {editing && isAdmin ? (
-                <Select value={deptId} onValueChange={setDeptId}>
+                <Select value={deptId} onValueChange={setDeptId} disabled={saving}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="none">지정 안 함</SelectItem>
@@ -560,7 +613,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="space-y-2">
               <Label className="text-slate-500">마감 기한</Label>
               {editing ? (
-                <Input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} />
+                <Input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)} disabled={saving} />
               ) : (
                 <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
                   <Calendar className="h-4 w-4 text-slate-400" />
@@ -591,7 +644,7 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             <div className="col-span-2 space-y-2">
               <Label className="text-slate-500">상세 설명</Label>
               {editing ? (
-                <Textarea value={desc} onChange={e => setDesc(e.target.value)} rows={4} placeholder="업무에 대한 상세 설명을 입력하세요..." />
+                <Textarea value={desc} onChange={e => setDesc(e.target.value)} rows={4} placeholder="업무에 대한 상세 설명을 입력하세요..." disabled={saving} />
               ) : (
                 <p className="text-sm text-slate-600 leading-relaxed whitespace-pre-wrap min-h-[60px]">
                   {task.description || "등록된 설명이 없습니다."}
@@ -601,8 +654,17 @@ function TaskDetailModal({ task, open, onOpenChange }: {
             
             {editing && (
               <div className="col-span-2 flex justify-end gap-2">
-                <Button variant="ghost" onClick={() => setEditing(false)}>취소</Button>
-                <Button onClick={handleSave}>저장하기</Button>
+                <Button variant="ghost" onClick={() => setEditing(false)} disabled={saving}>취소</Button>
+                <Button onClick={() => void handleSave()} disabled={saving}>
+                  {saving ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      저장 중…
+                    </>
+                  ) : (
+                    "저장하기"
+                  )}
+                </Button>
               </div>
             )}
           </div>
@@ -658,22 +720,23 @@ function TaskDetailModal({ task, open, onOpenChange }: {
                 className="min-h-[100px] bg-white border border-slate-200 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all resize-none shadow-sm text-sm"
                 value={newComment}
                 onChange={e => setNewComment(e.target.value)}
+                disabled={commentSubmitting}
               />
               <div className="flex justify-end gap-2">
                  <Button 
                    variant="secondary"
-                   disabled={!newComment.trim()} 
+                   disabled={!newComment.trim() || commentSubmitting} 
                    onClick={() => setNewComment("")}
                    className="h-9 px-4 text-xs font-medium"
                  >
                     취소
                  </Button>
                  <Button 
-                   disabled={!newComment.trim()} 
-                   onClick={handleAddComment}
+                   disabled={!newComment.trim() || commentSubmitting} 
+                   onClick={() => void handleAddComment()}
                    className="h-9 px-4 text-xs font-bold bg-blue-600 hover:bg-blue-700 text-white gap-2 shadow-sm"
                  >
-                    <MessageSquare className="h-3.5 w-3.5" />
+                    {commentSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <MessageSquare className="h-3.5 w-3.5" />}
                     댓글 저장
                  </Button>
               </div>
@@ -705,29 +768,18 @@ export function TasksView() {
   const [newAssigneeIds, setNewAssigneeIds] = useState<string[]>([]);
   const [newDescription, setNewDescription] = useState("");
 
-  // 모달 열릴 때 초기화
-  useEffect(() => {
-    if (isCreating && session?.id) {
-       setNewAssigneeIds([session.id]);
-    }
-  }, [isCreating, session?.id]);
-  
   // Detail Modal State
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+
+  /** 목록이 갱신돼도 상세 모달은 항상 최신 task 객체를 표시 */
+  const detailTask = useMemo(() => {
+    if (!selectedTask) return null;
+    return tasks.find((t) => t.id === selectedTask.id) ?? selectedTask;
+  }, [tasks, selectedTask]);
 
   const myDept = useMemo(() => {
     return departments.find(d => d.id === session?.department_id);
   }, [departments, session?.department_id]);
-
-  // Sync selectedTask with latest data from global tasks array
-  useEffect(() => {
-    if (selectedTask) {
-      const updated = tasks.find(t => t.id === selectedTask.id);
-      if (updated && JSON.stringify(updated) !== JSON.stringify(selectedTask)) {
-        setSelectedTask(updated);
-      }
-    }
-  }, [tasks, selectedTask]);
 
   const filteredTasks = useMemo(() => {
     return tasks.filter(t => {
@@ -745,16 +797,29 @@ export function TasksView() {
     });
   }, [tasks, search, filterDept, filterPriority, isAdmin, session]);
 
+  const tasksByStatus = useMemo(() => {
+    const m: Record<TaskStatus, Task[]> = {
+      todo: [],
+      in_progress: [],
+      pending: [],
+      done: [],
+    };
+    const valid = new Set<TaskStatus>(["todo", "in_progress", "pending", "done"]);
+    for (const t of filteredTasks) {
+      const s = valid.has(t.status) ? t.status : "todo";
+      m[s].push(t);
+    }
+    return m;
+  }, [filteredTasks]);
+
   const onDragEnd = (e: DragEndEvent) => {
     const { active, over } = e;
     if (!over) return;
     const next = over.id as TaskStatus;
-    if (["todo", "in_progress", "done"].includes(next)) {
+    if (["todo", "in_progress", "pending", "done"].includes(next)) {
       void moveTask(String(active.id), next);
     }
   };
-
-  const byStatus = (s: TaskStatus) => filteredTasks.filter((t) => t.status === s);
 
   return (
     <div className="space-y-8">
@@ -782,7 +847,13 @@ export function TasksView() {
               달력 보기
             </Button>
           </div>
-          <Button className="gap-2" onClick={() => setIsCreating(true)}>
+          <Button
+            className="gap-2"
+            onClick={() => {
+              setIsCreating(true);
+              if (session?.id) setNewAssigneeIds([session.id]);
+            }}
+          >
              <Plus className="h-4 w-4" />
              업무 추가
           </Button>
@@ -847,7 +918,7 @@ export function TasksView() {
                   key={col.status}
                   status={col.status}
                   title={col.title}
-                  tasks={byStatus(col.status)}
+                  tasks={tasksByStatus[col.status]}
                   onCardClick={(t) => setSelectedTask(t)}
                 />
               ))}
@@ -864,10 +935,10 @@ export function TasksView() {
           <div key={col.status} className="space-y-3">
              <div className="flex items-center gap-2">
                 <div className={`h-2.5 w-2.5 rounded-full ${col.theme.dot}`} />
-                <h3 className={`font-bold text-slate-800`}>{col.title} ({byStatus(col.status).length})</h3>
+                <h3 className={`font-bold text-slate-800`}>{col.title} ({tasksByStatus[col.status].length})</h3>
              </div>
              <div className="grid gap-3">
-               {byStatus(col.status).map(t => {
+               {tasksByStatus[col.status].map(t => {
                   const theme = COLS.find(c => c.status === t.status)?.theme || COLS[0].theme;
                   return (
                     <Card key={t.id} className={`active:scale-[0.98] transition-transform border-l-4 ${theme.accent} ${theme.light}`} onClick={() => setSelectedTask(t)}>
@@ -904,14 +975,20 @@ export function TasksView() {
                     </CardContent>
                  </Card>
                )})}
-               {byStatus(col.status).length === 0 && <p className="text-center py-6 text-sm text-slate-300 italic border-2 border-dashed border-slate-100 rounded-2xl">업무가 없습니다.</p>}
+               {tasksByStatus[col.status].length === 0 && <p className="text-center py-6 text-sm text-slate-300 italic border-2 border-dashed border-slate-100 rounded-2xl">업무가 없습니다.</p>}
              </div>
           </div>
         ))}
       </div>
 
       {/* Quick Add Dialog */}
-      <Dialog open={isCreating} onOpenChange={setIsCreating}>
+      <Dialog
+        open={isCreating}
+        onOpenChange={(open) => {
+          setIsCreating(open);
+          if (open && session?.id) setNewAssigneeIds([session.id]);
+        }}
+      >
         <DialogContent className={`max-w-md transition-colors duration-500 overflow-hidden shadow-2xl ${
            newPriority === "urgent" ? "bg-red-50 ring-1 ring-red-200" :
            newPriority === "high" ? "bg-orange-50 ring-1 ring-orange-200" :
@@ -1094,11 +1171,13 @@ export function TasksView() {
       </Dialog>
 
       {/* Detail Modal */}
-      {selectedTask && (
+      {detailTask && (
         <TaskDetailModal 
-          task={selectedTask} 
-          open={!!selectedTask} 
-          onOpenChange={(open) => !open && setSelectedTask(null)} 
+          task={detailTask} 
+          open 
+          onOpenChange={(open) => {
+            if (!open) setSelectedTask(null);
+          }} 
         />
       )}
     </div>

@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
-import { useAuth } from "@/context/auth-context";
+import { useAuth, type AuthSession } from "@/context/auth-context";
 import {
   initialApprovals,
   initialCallLogs,
@@ -43,7 +43,6 @@ import type {
   Department,
   Task,
   TaskStatus,
-  TaskPriority,
   TaskComment,
   UserRole,
 } from "@/lib/types";
@@ -60,7 +59,7 @@ type AppStateValue = {
   role: UserRole;
   setRole: (r: UserRole) => void;
   isAdmin: boolean;
-  session: any | null;
+  session: AuthSession | null;
   tasks: Task[];
   addTask: (
     t: Omit<Task, "id" | "companyId" | "createdAt" | "updatedAt">,
@@ -69,7 +68,7 @@ type AppStateValue = {
   moveTask: (taskId: string, status: TaskStatus) => Promise<void>;
   deleteTask: (taskId: string) => Promise<void>;
   getTaskComments: (taskId: string) => Promise<TaskComment[]>;
-  addTaskComment: (taskId: string, content: string) => Promise<void>;
+  addTaskComment: (taskId: string, content: string) => Promise<TaskComment | null>;
   deleteTaskComment: (commentId: string) => Promise<void>;
   callLogs: CallLog[];
   addCallLog: (c: Omit<CallLog, "id" | "company_id" | "createdAt">) => void;
@@ -202,6 +201,36 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }
   }, [supabase, session]);
 
+  /** 단일 업무 행을 목록과 동일한 조인으로 조회 (전체 reload 대체용) */
+  const fetchTaskById = useCallback(
+    async (taskId: string): Promise<Task | null> => {
+      if (!supabase || !session?.company_id) return null;
+      const { data, error } = await supabase
+        .from("tasks")
+        .select(
+          `
+          *,
+          task_assignments(
+            account_id,
+            intranet_accounts(display_name)
+          ),
+          department:departments(name),
+          comment_count:task_comments(count)
+        `,
+        )
+        .eq("company_id", session.company_id)
+        .eq("id", taskId)
+        .maybeSingle();
+
+      if (error || !data) {
+        if (error) toast.error(error.message);
+        return null;
+      }
+      return rowToTask(data as TaskRow);
+    },
+    [supabase, session],
+  );
+
   const reloadCompanyData = useCallback(async () => {
     await reloadFromSupabase();
   }, [reloadFromSupabase]);
@@ -311,19 +340,28 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
 
       if (t.assigneeIds && t.assigneeIds.length > 0) {
-        await supabase.from("task_assignments").insert(
+        const { error: aErr } = await supabase.from("task_assignments").insert(
           t.assigneeIds.map((uid) => ({
             task_id: data.id,
             account_id: uid,
           })),
         );
+        if (aErr) {
+          toast.error("담당자 지정에 실패했습니다: " + aErr.message);
+          return false;
+        }
       }
 
-      await reloadFromSupabase();
+      const fresh = await fetchTaskById(data.id);
+      if (fresh) {
+        setTasks((prev) => [fresh, ...prev.filter((x) => x.id !== fresh.id)]);
+      } else {
+        await reloadFromSupabase();
+      }
       toast.success("업무가 등록되었습니다.");
       return true;
     },
-    [useDatabase, supabase, session, companyId, reloadFromSupabase],
+    [useDatabase, supabase, session, companyId, fetchTaskById, reloadFromSupabase],
   );
 
   const updateTask = useCallback(
@@ -336,19 +374,18 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
 
       const { assigneeIds, ...rest } = patch;
-      const dbPatch: any = {};
+      const dbPatch: Record<string, unknown> = {};
       if (rest.title !== undefined) dbPatch.title = rest.title;
       if (rest.description !== undefined) dbPatch.description = rest.description;
       if (rest.status !== undefined) dbPatch.status = rest.status;
       if (rest.priority !== undefined) dbPatch.priority = rest.priority;
       if (rest.dueDate !== undefined) dbPatch.due_date = rest.dueDate;
       if (rest.departmentId !== undefined) dbPatch.department_id = rest.departmentId;
+      if (rest.startedAt !== undefined) dbPatch.started_at = rest.startedAt;
+      if (rest.finishedAt !== undefined) dbPatch.finished_at = rest.finishedAt;
 
       if (Object.keys(dbPatch).length > 0) {
-        const { error } = await supabase
-          .from("tasks")
-          .update(dbPatch)
-          .eq("id", taskId);
+        const { error } = await supabase.from("tasks").update(dbPatch).eq("id", taskId);
         if (error) {
           toast.error("업무 정보를 수정하지 못했습니다: " + error.message);
           return;
@@ -356,39 +393,86 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
 
       if (assigneeIds !== undefined) {
-        // 기존 담당자 삭제 후 다시 삽입
-        await supabase.from("task_assignments").delete().eq("task_id", taskId);
-        if (assigneeIds.length > 0) {
-          const { error: assignError } = await supabase
+        const prevTask = tasks.find((t) => t.id === taskId);
+        const prevIds = new Set(prevTask?.assigneeIds ?? []);
+        const nextIds = new Set(assigneeIds);
+        const toRemove = [...prevIds].filter((id) => !nextIds.has(id));
+        const toAdd = [...nextIds].filter((id) => !prevIds.has(id));
+
+        if (toRemove.length > 0) {
+          const { error: delErr } = await supabase
             .from("task_assignments")
-            .insert(assigneeIds.map(uid => ({ task_id: taskId, account_id: uid })));
-          if (assignError) {
-            toast.error("담당자 정보를 수정하지 못했습니다: " + assignError.message);
+            .delete()
+            .eq("task_id", taskId)
+            .in("account_id", toRemove);
+          if (delErr) {
+            toast.error("담당자 정보를 수정하지 못했습니다: " + delErr.message);
+            return;
+          }
+        }
+        if (toAdd.length > 0) {
+          const { error: insErr } = await supabase.from("task_assignments").insert(
+            toAdd.map((uid) => ({ task_id: taskId, account_id: uid })),
+          );
+          if (insErr) {
+            toast.error("담당자 정보를 수정하지 못했습니다: " + insErr.message);
             return;
           }
         }
       }
 
-      await reloadFromSupabase();
+      const fresh = await fetchTaskById(taskId);
+      if (fresh) {
+        setTasks((prev) => prev.map((t) => (t.id === taskId ? fresh : t)));
+      } else {
+        await reloadFromSupabase();
+      }
       toast.success("업무가 수정되었습니다.");
     },
-    [useDatabase, supabase, reloadFromSupabase],
+    [useDatabase, supabase, tasks, fetchTaskById, reloadFromSupabase],
   );
 
   const moveTask = useCallback(
     async (taskId: string, status: TaskStatus) => {
       if (!useDatabase || !supabase) {
-        setTasks((prev) => prev.map((x) => (x.id === taskId ? { ...x, status } : x)));
+        const today = new Date().toISOString().split("T")[0];
+        setTasks((prev) =>
+          prev.map((x) => {
+            if (x.id !== taskId) return x;
+            let next: Task = { ...x, status };
+            if (status === "in_progress") next = { ...next, startedAt: today };
+            if (status === "done") next = { ...next, finishedAt: today };
+            return next;
+          }),
+        );
         return;
       }
-      const { error } = await supabase.from("tasks").update({ status }).eq("id", taskId);
+      const today = new Date().toISOString().split("T")[0];
+      const dbUpdate: Record<string, unknown> = { status };
+      if (status === "in_progress") dbUpdate.started_at = today;
+      if (status === "done") dbUpdate.finished_at = today;
+
+      const { error } = await supabase.from("tasks").update(dbUpdate).eq("id", taskId);
       if (error) {
         toast.error(error.message);
         return;
       }
-      setTasks((prev) => prev.map((x) => (x.id === taskId ? { ...x, status } : x)));
+      const fresh = await fetchTaskById(taskId);
+      if (fresh) {
+        setTasks((prev) => prev.map((x) => (x.id === taskId ? fresh : x)));
+      } else {
+        setTasks((prev) =>
+          prev.map((x) => {
+            if (x.id !== taskId) return x;
+            let next: Task = { ...x, status };
+            if (status === "in_progress") next = { ...next, startedAt: today };
+            if (status === "done") next = { ...next, finishedAt: today };
+            return next;
+          }),
+        );
+      }
     },
-    [useDatabase, supabase],
+    [useDatabase, supabase, fetchTaskById],
   );
 
   const deleteTask = useCallback(
@@ -427,34 +511,57 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   );
 
   const addTaskComment = useCallback(
-    async (taskId: string, content: string) => {
-      if (!useDatabase || !supabase || !session?.id) return;
-      const { error } = await supabase.from("task_comments").insert({
-        task_id: taskId,
-        author_id: session.id,
-        content: content.trim(),
-      });
+    async (taskId: string, content: string): Promise<TaskComment | null> => {
+      if (!useDatabase || !supabase || !session?.id) return null;
+      const { data, error } = await supabase
+        .from("task_comments")
+        .insert({
+          task_id: taskId,
+          author_id: session.id,
+          content: content.trim(),
+        })
+        .select("*, author:intranet_accounts(display_name)")
+        .single();
       if (error) {
         toast.error(error.message);
-        return;
+        return null;
       }
-      // 댓글 수 업데이트를 위해 태스크 목록 다시 로드
-      await reloadFromSupabase();
+      const comment = rowToTaskComment(data as TaskCommentRow);
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === taskId ? { ...t, commentCount: (t.commentCount ?? 0) + 1 } : t,
+        ),
+      );
+      return comment;
     },
-    [useDatabase, supabase, session?.id, reloadFromSupabase],
+    [useDatabase, supabase, session],
   );
 
   const deleteTaskComment = useCallback(
     async (commentId: string) => {
       if (!useDatabase || !supabase) return;
+      const { data: row } = await supabase
+        .from("task_comments")
+        .select("task_id")
+        .eq("id", commentId)
+        .maybeSingle();
+      const taskId = row?.task_id as string | undefined;
+
       const { error } = await supabase.from("task_comments").delete().eq("id", commentId);
       if (error) {
         toast.error(error.message);
         return;
       }
-      await reloadFromSupabase();
+      if (taskId) {
+        const fresh = await fetchTaskById(taskId);
+        if (fresh) {
+          setTasks((prev) => prev.map((t) => (t.id === taskId ? fresh : t)));
+        } else {
+          await reloadFromSupabase();
+        }
+      }
     },
-    [useDatabase, supabase, reloadFromSupabase],
+    [useDatabase, supabase, fetchTaskById, reloadFromSupabase],
   );
 
   const addCallLog = useCallback(
@@ -509,7 +616,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     await reloadFromSupabase();
     toast.message("업무 관리 접수 탭에 카드가 생성되었습니다.");
     },
-    [useDatabase, supabase, companyId, reloadFromSupabase, addTask],
+    [useDatabase, supabase, companyId, reloadFromSupabase, addTask, session],
   );
 
   const addApproval = useCallback(
@@ -923,6 +1030,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       role,
       setRole,
       isAdmin,
+      session,
       tasks,
       addTask,
       updateTask,
@@ -941,6 +1049,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       updateUser,
       removeUser,
       companyProfile,
+      updateCompanyProfile,
       departments,
       addDepartment,
       updateDepartment,
