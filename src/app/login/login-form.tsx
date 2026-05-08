@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Clock, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,12 +47,42 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const next = searchParams.get("next") ?? "/dashboard";
   const registered = searchParams.get("registered") === "1";
+  const errorCode = searchParams.get("error");
+  const registeredMessage = searchParams.get("msg");
 
+  const [companyCode, setCompanyCode] = useState("");
+  const [requireCompanyCode, setRequireCompanyCode] = useState(true);
+  const [tenantName, setTenantName] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [pendingName, setPendingName] = useState<string | null>(null);
+
+  const oauthErrorMap: Record<string, string> = {
+    supabase_not_configured: "Supabase 설정이 없어 Google 로그인을 사용할 수 없습니다.",
+    supabase_client_error: "인증 클라이언트 초기화에 실패했습니다.",
+    google_oauth_start_failed: "Google 로그인 시작에 실패했습니다. 잠시 후 다시 시도해 주세요.",
+    google_code_missing: "Google 인증 코드가 누락되었습니다.",
+    google_exchange_failed: "Google 인증 세션 교환에 실패했습니다.",
+    google_user_not_found: "Google 사용자 정보를 가져오지 못했습니다.",
+    google_account_not_linked:
+      "이 Google 계정과 연결된 사내 계정이 없습니다. 관리자에게 아이디(이메일) 발급을 요청하세요.",
+    login_disabled: "로그인이 비활성화된 계정입니다. 관리자에게 문의하세요.",
+  };
+  const oauthMessage = errorCode ? oauthErrorMap[errorCode] ?? "Google 로그인에 실패했습니다." : null;
+
+  useEffect(() => {
+    void (async () => {
+      const res = await fetch("/api/tenant/context", { cache: "no-store" });
+      const json = (await res.json().catch(() => ({}))) as {
+        requireCompanyCode?: boolean;
+        tenantName?: string | null;
+      };
+      setRequireCompanyCode(json.requireCompanyCode !== false);
+      setTenantName(json.tenantName ?? null);
+    })();
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,7 +92,18 @@ export function LoginForm() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ username: username.trim(), password: password.trim() }),
+      body: JSON.stringify(
+        requireCompanyCode
+          ? {
+              companyCode: companyCode.trim().toUpperCase(),
+              username: username.trim(),
+              password: password.trim(),
+            }
+          : {
+              username: username.trim(),
+              password: password.trim(),
+            },
+      ),
     });
     const json = (await res.json().catch(() => ({}))) as { error?: string };
     setBusy(false);
@@ -91,6 +132,10 @@ export function LoginForm() {
           <h1 className="text-xl font-bold text-slate-900">로그인 비활성</h1>
           <p className="mt-2 text-slate-600">
             Supabase URL·키가 없으면 로그인 없이 데모만 사용할 수 있습니다.{" "}
+            <Link className="text-blue-600 underline" href="/setup">
+              연결 설정하기
+            </Link>
+            {" · "}
             <Link className="text-blue-600 underline" href="/dashboard">
               대시보드로
             </Link>
@@ -108,7 +153,9 @@ export function LoginForm() {
         </div>
         <div>
           <p className="text-lg font-bold text-slate-900">회사 인트라넷</p>
-          <p className="text-sm text-slate-500">관리자 발급 아이디 · 비밀번호</p>
+          <p className="text-sm text-slate-500">
+            {tenantName ? `${tenantName} 전용 로그인` : "관리자 발급 아이디 · 비밀번호"}
+          </p>
         </div>
       </div>
 
@@ -118,11 +165,20 @@ export function LoginForm() {
       >
         {registered && (
           <p className="rounded-lg bg-emerald-50 px-3 py-2 text-sm leading-relaxed text-emerald-900 ring-1 ring-emerald-200/80">
-            신청이 완료됐습니다. <strong>관리자가 계정을 발급</strong>하면 이름과 동일한 아이디·기본 비밀번호{" "}
-            <strong>{DEFAULT_EMPLOYEE_PASSWORD}</strong>로 로그인하세요.
+            {registeredMessage ?? "가입이 완료됐습니다. 생성한 관리자 아이디·비밀번호로 로그인하세요."}
           </p>
         )}
 
+        {requireCompanyCode && (
+          <Input
+            id="companyCode"
+            autoComplete="off"
+            value={companyCode}
+            onChange={(e) => setCompanyCode(e.target.value)}
+            required
+            placeholder="회사코드 (예: ABCD1234)"
+          />
+        )}
         <Input
           id="username"
           autoComplete="username"
@@ -146,6 +202,11 @@ export function LoginForm() {
             {message}
           </p>
         )}
+        {oauthMessage && (
+          <p className="rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800 ring-1 ring-red-200">
+            {oauthMessage}
+          </p>
+        )}
 
         <Button type="submit" className="w-full" disabled={busy}>
           {busy ? (
@@ -157,13 +218,23 @@ export function LoginForm() {
             "로그인"
           )}
         </Button>
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          disabled={busy}
+          onClick={() => {
+            const encodedNext = encodeURIComponent(next);
+            window.location.href = `/api/auth/google/start?next=${encodedNext}`;
+          }}
+        >
+          Google로 로그인
+        </Button>
 
         <p className="text-center text-sm text-slate-500">
           <Link href="/signup" className="font-medium text-blue-600 underline">
-            회원가입
+            회사 가입
           </Link>
-          {" · "}
-          직원은 신청 후 발급 아이디·기본 비밀번호 {DEFAULT_EMPLOYEE_PASSWORD}로 로그인합니다.
         </p>
       </form>
     </div>

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { jsonWithSessionCookie } from "@/lib/auth/cookie-response";
+import { ensureSupabaseAuthLink } from "@/lib/auth/supabase-auth-link";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { extractTenantSlugFromHost, resolveTenantBySlug } from "@/lib/tenant/resolve";
 import { isSupabaseConfigured } from "@/lib/supabase/env";
 
 type VerifyRow = {
@@ -18,13 +20,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Supabase 미설정" }, { status: 503 });
   }
 
-  let body: { username?: string; password?: string };
+  let body: { companyCode?: string; username?: string; password?: string };
   try {
-    body = (await req.json()) as { username?: string; password?: string };
+    body = (await req.json()) as { companyCode?: string; username?: string; password?: string };
   } catch {
     return NextResponse.json({ error: "잘못된 요청" }, { status: 400 });
   }
 
+  const companyCode = body.companyCode?.trim();
   const username = body.username?.trim();
   const password = (body.password ?? "").trim();
   if (!username || !password) {
@@ -36,12 +39,38 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Supabase 클라이언트 오류" }, { status: 500 });
   }
 
+  // 1) 도메인 기반 회사 식별 우선
+  const tenantSlug = extractTenantSlugFromHost(req.headers.get("host"));
+  let resolvedCode: string | null = null;
+  if (tenantSlug) {
+    const tenant = await resolveTenantBySlug(tenantSlug);
+    resolvedCode = tenant?.invite_code ?? null;
+    if (!resolvedCode) {
+      return NextResponse.json({ error: "등록되지 않은 회사 도메인입니다." }, { status: 404 });
+    }
+  } else {
+    // 2) 로컬/공용도메인 fallback: 회사코드 입력 사용
+    resolvedCode = companyCode?.toUpperCase() ?? null;
+  }
+
+  if (!resolvedCode) {
+    return NextResponse.json({ error: "회사코드를 입력하세요." }, { status: 400 });
+  }
+
   const { data, error } = await supabase.rpc("verify_login", {
+    p_invite_code: resolvedCode,
     p_username: username,
     p_password: password,
   });
 
   if (error) {
+    const message = (error.message ?? "").toLowerCase();
+    if (message.includes("fetch failed") || message.includes("failed to fetch")) {
+      return NextResponse.json(
+        { error: "Supabase 연결에 실패했습니다. URL/키 또는 네트워크 상태를 확인하세요." },
+        { status: 503 },
+      );
+    }
     return NextResponse.json({ error: error.message }, { status: 401 });
   }
 
@@ -53,9 +82,17 @@ export async function POST(req: Request) {
   const ua = req.headers.get("user-agent") ?? null;
 
   if (!row) {
+    const { data: company } = await supabase
+      .from("companies")
+      .select("id")
+      .eq("invite_code", resolvedCode)
+      .maybeSingle();
+    const companyId = company?.id as string | undefined;
+
     const { data: withUsername } = await supabase
       .from("intranet_accounts")
       .select("id, company_id")
+      .eq("company_id", companyId ?? "")
       .eq("username", username)
       .limit(1);
 
@@ -76,6 +113,7 @@ export async function POST(req: Request) {
     const { data: pendingOnly } = await supabase
       .from("intranet_accounts")
       .select("id")
+      .eq("company_id", companyId ?? "")
       .is("username", null)
       .eq("display_name", username)
       .limit(1);
@@ -109,6 +147,17 @@ export async function POST(req: Request) {
   }
 
   const role = row.role === "admin" ? "admin" : "user";
+
+  // Supabase Auth 전환 준비: 로그인 성공 시 auth.users 계정 자동 연동
+  await ensureSupabaseAuthLink({
+    accountId: row.id,
+    companyId: row.company_id,
+    username: row.username,
+    password,
+    displayName: row.display_name,
+    role,
+  });
+
   try {
     return await jsonWithSessionCookie(
       { ok: true, must_change_password: row.must_change_password === true },

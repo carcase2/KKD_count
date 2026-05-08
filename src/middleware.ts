@@ -9,7 +9,8 @@ export async function middleware(request: NextRequest) {
     path.startsWith("/login") ||
     path.startsWith("/signup") ||
     path.startsWith("/auth/") ||
-    path.startsWith("/api/auth/");
+    path.startsWith("/api/auth/") ||
+    path.startsWith("/api/system/");
 
   if (!isSupabaseConfigured()) {
     return NextResponse.next();
